@@ -147,27 +147,83 @@ function renderList() {
 
 // ------------------------------------------------------------- detail
 
-function messageHtml(m) {
+/**
+ * Per-request fold state. A message folds when the user toggles it, or by
+ * default when it is a system prompt / long enough to hog the panel. The
+ * default only applies until the user explicitly toggles that message.
+ */
+const FOLD_PREVIEW_CHARS = 240;
+const FOLD_DEFAULT_CHARS = 600;
+const foldOverride = new Map(); // requestId -> Map(msgIdx -> bool: collapsed)
+
+function bodyTextOf(m) {
+  const parts = [];
+  if (m.content != null && m.content !== '') parts.push(String(m.content));
+  for (const tc of m.tool_calls || []) {
+    parts.push(`${tc.function?.name || 'function'} ${tc.function?.arguments || '{}'}`);
+  }
+  return parts.join('\n');
+}
+
+function foldDefaultFor(rId, m) {
+  return m.role === 'system' || bodyTextOf(m).length > FOLD_DEFAULT_CHARS;
+}
+
+function isFolded(rId, idx, m) {
+  const per = foldOverride.get(rId);
+  if (per && per.has(idx)) return per.get(idx);
+  return foldDefaultFor(rId, m);
+}
+
+function toggleFold(rId, idx) {
+  const r = state.requests.find((x) => x.id === rId);
+  const m = r?.body?.messages?.[idx];
+  if (!m) return;
+  const per = foldOverride.get(rId) || new Map();
+  per.set(idx, !isFolded(rId, idx, m));
+  foldOverride.set(rId, per);
+}
+
+function messageHtml(rId, m, idx) {
   const content = m.content ?? '';
-  let html = `<div class="msg msg-${esc(m.role)}">`;
-  html += `<div class="msg-head">`;
+  const text = bodyTextOf(m);
+  const folded = text !== '' && isFolded(rId, idx, m);
+  const hasBody = text !== '';
+
+  let html = `<div class="msg msg-${esc(m.role)} ${folded ? 'msg-folded' : ''}">`;
+  html += `<div class="msg-head" ${hasBody ? `data-fold-idx="${idx}"` : ''}>`;
+  html += hasBody
+    ? `<button class="msg-toggle" data-fold-idx="${idx}" aria-expanded="${!folded}"
+         title="${folded ? 'Expand message' : 'Fold message'}">${folded ? '▸' : '▾'}</button>`
+    : `<span class="msg-toggle msg-toggle-spacer"></span>`;
   html += `<span class="role">${esc(m.role)}</span>`;
   if (m.name) html += `<span>name: ${esc(m.name)}</span>`;
   if (m.tool_call_id) html += `<span>↳ ${esc(m.tool_call_id)}</span>`;
   html += `</div>`;
-  if (content !== '' && content != null) html += `<div class="msg-content">${esc(content)}</div>`;
-  if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
-    html += `<div class="tool-calls">`;
-    for (const tc of m.tool_calls) {
-      const fn = tc.function || {};
-      let args = fn.arguments || '{}';
-      try { args = JSON.stringify(JSON.parse(args), null, 2); } catch { /* keep raw */ }
-      html += `<div class="tool-call">
-        <div class="tool-call-head">🔧 ${esc(fn.name || 'function')} <code>${esc(tc.id || '')}</code></div>
-        <pre>${esc(args)}</pre>
-      </div>`;
+
+  if (folded) {
+    const preview = text.length > FOLD_PREVIEW_CHARS
+      ? text.slice(0, FOLD_PREVIEW_CHARS) + '…'
+      : text;
+    html += `<div class="msg-body msg-preview">${esc(preview)}</div>`;
+    html += `<div class="fold-hint">folded · click header to expand</div>`;
+  } else {
+    if (content !== '' && content != null) {
+      html += `<div class="msg-content">${esc(content)}</div>`;
     }
-    html += `</div>`;
+    if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      html += `<div class="tool-calls">`;
+      for (const tc of m.tool_calls) {
+        const fn = tc.function || {};
+        let args = fn.arguments || '{}';
+        try { args = JSON.stringify(JSON.parse(args), null, 2); } catch { /* keep raw */ }
+        html += `<div class="tool-call">
+          <div class="tool-call-head">🔧 ${esc(fn.name || 'function')} <code>${esc(tc.id || '')}</code></div>
+          <pre>${esc(args)}</pre>
+        </div>`;
+      }
+      html += `</div>`;
+    }
   }
   html += `</div>`;
   return html;
@@ -196,7 +252,7 @@ function renderDetail() {
   if (r.stream) badges.push('<span class="badge stream">stream</span>');
   if (r.clientDisconnected) badges.push('<span class="badge client_gone">client gone</span>');
 
-  const thread = (r.body?.messages || []).map(messageHtml).join('');
+  const thread = (r.body?.messages || []).map((m, i) => messageHtml(r.id, m, i)).join('');
   const toolNames = toolNamesOf(r);
   const toolsHtml = toolNames.length
     ? `<div class="tools-available">Tools the client declared:
@@ -244,6 +300,16 @@ function renderDetail() {
     <div class="banner-error" id="banner-error"></div>
     ${bodyHtml}
   `;
+
+  // Fold/unfold messages: clicking the chevron or the message header toggles.
+  const threadEl = detail.querySelector('.thread');
+  threadEl.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-fold-idx]');
+    if (!el) return;
+    e.preventDefault();
+    toggleFold(r.id, Number(el.dataset.foldIdx));
+    renderDetail();
+  });
 
   if (r.status === 'pending') wireForm(r);
 }

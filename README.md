@@ -96,7 +96,9 @@ node examples/toolcall.js --with-tool-result   # continue the round trip
 
 - See every request live (SSE push), newest first, with filters.
 - Inspect the full message thread: system / user / assistant / tool roles,
-  tool calls and their JSON arguments, declared tools.
+  tool calls and their JSON arguments, declared tools. Long messages (and
+  system prompts in particular) start **folded** — click a message header to
+  expand or fold it, keeping the panel readable.
 - Reply with **content**, **tool calls** (name + JSON arguments, validated),
   or both. `⌘/Ctrl + Enter` sends.
 - Send an **error** or **dismiss** the request.
