@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Human API — Control Room</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>🧑‍💻 Human API <span class="sub">— you are the model</span></h1>
+    <div class="status">
+      <span id="conn-dot" class="dot"></span>
+      <span id="conn-text">connecting…</span>
+      <span class="sep">·</span>
+      <span id="queue-count"></span>
+    </div>
+  </header>
+
+  <main>
+    <aside>
+      <div class="filters" id="filters">
+        <button class="chip active" data-filter="all">All</button>
+        <button class="chip" data-filter="pending">Pending</button>
+        <button class="chip" data-filter="completed">Done</button>
+        <button class="chip" data-filter="problem">Errors</button>
+      </div>
+      <div id="request-list" class="request-list"></div>
+    </aside>
+
+    <section id="detail" class="detail">
+      <div class="empty" id="empty-state">
+        <div class="empty-icon">🫖</div>
+        <p>No request selected.</p>
+        <p class="muted">Requests sent to <code>/v1/chat/completions</code> will
+        appear here, waiting for you. You answer them — the client gets a
+        perfect OpenAI-shaped response.</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

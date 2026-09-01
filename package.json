@@ -1,0 +1,20 @@
+{
+  "name": "human-api",
+  "version": "1.0.0",
+  "description": "OpenAI-compatible API endpoint that parks every request and waits for a human to answer it in a web UI. No AI involved.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "openai",
+    "proxy",
+    "human",
+    "tool-calls",
+    "llm"
+  ],
+  "license": "MIT"
+}
