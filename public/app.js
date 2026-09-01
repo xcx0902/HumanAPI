@@ -234,6 +234,64 @@ function toolNamesOf(r) {
   return tools.map((t) => t.function?.name).filter(Boolean);
 }
 
+/**
+ * Tools the client declared, rendered as clickable name chips. Details
+ * (description, parameter schema, strict flag) stay hidden until a name is
+ * clicked, so a request with many/big tool definitions doesn't flood the
+ * panel. Expansion state is remembered per request across re-renders.
+ */
+const toolOpen = new Set(); // "requestId:toolIdx"
+
+function toolDetailOf(t) {
+  const fn = t.function || t; // tolerate both nested and flat tool defs
+  const name = fn.name || '(unnamed)';
+  const desc = typeof fn.description === 'string' ? fn.description : '';
+
+  let paramsPretty = null;
+  if (fn.parameters != null) {
+    try {
+      paramsPretty = JSON.stringify(
+        typeof fn.parameters === 'string' ? JSON.parse(fn.parameters) : fn.parameters,
+        null,
+        2
+      );
+    } catch {
+      paramsPretty = String(fn.parameters);
+    }
+  }
+
+  const meta = [];
+  if (fn.strict !== undefined) meta.push(`strict: ${JSON.stringify(fn.strict)}`);
+  if (t.type && t.type !== 'function') meta.push(`type: ${esc(t.type)}`);
+  return { name, desc, paramsPretty, meta };
+}
+
+function toolsHtmlOf(r) {
+  const tools = r.body?.tools || [];
+  if (tools.length === 0) return '';
+  const items = tools
+    .map((t, i) => {
+      const { name, desc, paramsPretty, meta } = toolDetailOf(t);
+      const key = `${r.id}:${i}`;
+      const open = toolOpen.has(key);
+      return `<div class="tool-item">
+        <button class="tool-chip" data-tool-idx="${i}" aria-expanded="${open}">
+          <span class="tool-chevron">${open ? '▾' : '▸'}</span>🔧 ${esc(name)}
+        </button>
+        <div class="tool-detail" ${open ? '' : 'hidden'}>
+          ${desc ? `<div class="tool-desc">${esc(desc)}</div>` : ''}
+          ${meta.length ? `<div class="tool-meta">${meta.join(' · ')}</div>` : ''}
+          ${paramsPretty ? `<div class="tool-params-title">parameters</div><pre class="tool-params">${esc(paramsPretty)}</pre>` : ''}
+        </div>
+      </div>`;
+    })
+    .join('');
+  return `<div class="tools-available">
+    <div class="tools-title">Tools the client declared — click a name for its details</div>
+    ${items}
+  </div>`;
+}
+
 function renderDetail() {
   const detail = $('#detail');
   const r = state.requests.find((x) => x.id === state.selectedId);
@@ -253,12 +311,7 @@ function renderDetail() {
   if (r.clientDisconnected) badges.push('<span class="badge client_gone">client gone</span>');
 
   const thread = (r.body?.messages || []).map((m, i) => messageHtml(r.id, m, i)).join('');
-  const toolNames = toolNamesOf(r);
-  const toolsHtml = toolNames.length
-    ? `<div class="tools-available">Tools the client declared:
-        ${toolNames.map((n) => `<code>${esc(n)}</code>`).join('')}
-      </div>`
-    : '';
+  const toolsHtml = toolsHtmlOf(r);
 
   let bodyHtml;
   if (r.status === 'pending') {
@@ -310,6 +363,19 @@ function renderDetail() {
     toggleFold(r.id, Number(el.dataset.foldIdx));
     renderDetail();
   });
+
+  // Tool chips: clicking a declared tool's name reveals its details.
+  const toolsEl = detail.querySelector('.tools-available');
+  if (toolsEl) {
+    toolsEl.addEventListener('click', (e) => {
+      const chip = e.target.closest('.tool-chip');
+      if (!chip) return;
+      const key = `${r.id}:${Number(chip.dataset.toolIdx)}`;
+      if (toolOpen.has(key)) toolOpen.delete(key);
+      else toolOpen.add(key);
+      renderDetail();
+    });
+  }
 
   if (r.status === 'pending') wireForm(r);
 }
