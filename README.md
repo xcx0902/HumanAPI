@@ -72,6 +72,22 @@ node examples/responses.js         # Responses API (flat tools, input items)
 node examples/responses.js --stream
 ```
 
+## Tests
+
+Zero-dependency integration suite — run it with `npm test` or
+`node test/run.js`. It copies the server into a throwaway temp directory
+(your real `data/` history is never touched), boots real instances, and
+exercises both OpenAI wire formats end-to-end (plain + streaming + tool
+calls, reject/dismiss errors), persistence across restarts, Clear history,
+legacy-file migration, and graceful shutdown:
+
+```bash
+node test/run.js
+```
+
+[GitHub Actions](.github/workflows/ci.yml) runs the same command on every
+push/PR against Node 22 and 24.
+
 ## Configuration
 
 | env var | default | meaning |
