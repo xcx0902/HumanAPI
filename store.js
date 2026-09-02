@@ -34,21 +34,33 @@ class Store {
     }
   }
 
+  _writeNow() {
+    try {
+      const terminal = [...this.requests.values()].filter(
+        (r) => r.status !== 'pending'
+      );
+      fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
+      const tmp = DATA_FILE + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(terminal, null, 2));
+      fs.renameSync(tmp, DATA_FILE);
+    } catch (err) {
+      console.error('[store] persist failed:', err.message);
+    }
+  }
+
   _persist() {
     clearTimeout(this._saveTimer);
-    this._saveTimer = setTimeout(() => {
-      try {
-        const terminal = [...this.requests.values()].filter(
-          (r) => r.status !== 'pending'
-        );
-        fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
-        const tmp = DATA_FILE + '.tmp';
-        fs.writeFileSync(tmp, JSON.stringify(terminal, null, 2));
-        fs.renameSync(tmp, DATA_FILE);
-      } catch (err) {
-        console.error('[store] persist failed:', err.message);
-      }
-    }, 200);
+    this._saveTimer = setTimeout(() => this._writeNow(), 200);
+  }
+
+  /**
+   * Write history to disk immediately (debounce bypass). Used by graceful
+   * shutdown so the last finished request is never lost to the 200ms timer.
+   */
+  flush() {
+    clearTimeout(this._saveTimer);
+    this._saveTimer = null;
+    this._writeNow();
   }
 
   onChange(fn) {

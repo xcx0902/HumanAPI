@@ -413,3 +413,45 @@ server.listen(PORT, HOST, () => {
   console.log(`│   Web UI:            http://${HOST}:${PORT}/`);
   console.log('└────────────────────────────────────────────────────────');
 });
+
+// ------------------------------------------------------- graceful shutdown
+
+let stopping = false;
+function shutdown(signal) {
+  if (stopping) return;
+  stopping = true;
+  console.log(`\n[server] ${signal} received — shutting down…`);
+
+  // 1. Dismiss still-parked requests so their clients get a proper error
+  //    (deliver() writes an error frame / JSON and closes the connection)
+  //    instead of a silent dead connection. Dismissed records are terminal,
+  //    so they are persisted like any other finished request.
+  const parked = store.list().filter((r) => r.status === 'pending');
+  if (parked.length > 0) {
+    console.log(`[server] dismissing ${parked.length} parked request(s)…`);
+    for (const r of parked) store.dismiss(r.id);
+  }
+
+  // 2. Persist history now — bypasses the 200ms debounce so the very last
+  //    finished request is never lost to the timer.
+  store.flush();
+
+  // 3. Close the listener, then exit once connections settle.
+  server.close(() => {
+    console.log('[server] stopped cleanly. history saved to data/requests.json');
+    process.exit(0);
+  });
+
+  // Idle keep-alive / SSE connections would hold server.close() open
+  // (keepAliveTimeout is 5s) — don't make shutdown wait on them.
+  const force = setTimeout(() => {
+    if (typeof server.closeAllConnections === 'function') {
+      server.closeAllConnections();
+    }
+    process.exit(0);
+  }, 2000);
+  force.unref();
+}
+
+process.on('SIGINT', () => shutdown('SIGINT (Ctrl+C)'));
+process.on('SIGTERM', () => shutdown('SIGTERM (kill)'));

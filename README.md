@@ -30,6 +30,11 @@ node server.js
 
 Open **http://127.0.0.1:8787/** — that's your control room.
 
+**Stopping the server:** `Ctrl+C` (or `kill <pid>`) shuts down gracefully —
+still-pending requests are dismissed so their clients get a proper error
+instead of a dead connection, and the history file is flushed immediately, so
+nothing is lost to the write debounce. Safe to stop any time.
+
 Then send it something from any OpenAI-compatible client:
 
 ```bash
