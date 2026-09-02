@@ -1,15 +1,25 @@
 'use strict';
 
 /**
- * In-memory request store with optional JSON persistence.
+ * In-memory request store with append-only JSONL persistence.
  *
  * Persistence: only requests that reached a terminal state (completed /
  * rejected / dismissed) are written to disk, so after a restart the web UI
  * still shows history. A `pending` request is never persisted — if the server
  * restarts its client connection is gone anyway.
+ *
+ * File format (data/requests.json): one compact JSON record per line. A
+ * finished request is APPENDED as a single line, so answering a request costs
+ * O(one record) instead of re-serializing the whole history. Writes run on a
+ * serialized async queue and never block the event loop; graceful shutdown
+ * awaits the queue via flush(). The file is rewritten whole only on Clear.
+ *
+ * Older builds wrote a pretty-printed JSON array to this file; that format is
+ * detected on load and converted to JSONL once.
  */
 
 const fs = require('fs');
+const fsp = fs.promises;
 const path = require('path');
 const crypto = require('crypto');
 const { buildResponse } = require('./response');
@@ -20,58 +30,126 @@ class Store {
   constructor() {
     this.requests = new Map(); // id -> record
     this.listeners = new Set(); // fn(record) on every change
-    this._saveTimer = null;
+    // Serialized queue of async file writes (appends + rewrites), so writes
+    // never interleave and shutdown can await the tail.
+    this._writeQueue = Promise.resolve();
     this._load();
   }
 
+  // ------------------------------------------------------------ loading
+
   _load() {
+    fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
+    let raw;
     try {
-      const raw = fs.readFileSync(DATA_FILE, 'utf8');
-      const arr = JSON.parse(raw);
-      for (const r of arr) this.requests.set(r.id, r);
+      raw = fs.readFileSync(DATA_FILE, 'utf8');
     } catch {
-      /* no history yet */
+      return; // no history yet
+    }
+    if (!raw.trim()) return;
+
+    const legacy = raw.trimStart().startsWith('[');
+    const records = legacy ? this._parseLegacy(raw) : this._parseJsonl(raw);
+    if (records === null) return; // unreadable history already logged
+    for (const r of records) {
+      if (r && typeof r.id === 'string') this.requests.set(r.id, r);
+    }
+    if (legacy) {
+      // One-time migration: rewrite the legacy JSON array as JSONL.
+      try {
+        this._writeFileSync(this._jsonlBody());
+        console.log('[store] converted legacy history to JSONL');
+      } catch (err) {
+        console.error('[store] legacy conversion failed:', err.message);
+      }
     }
   }
 
-  _writeNow() {
+  _parseLegacy(raw) {
     try {
-      const terminal = [...this.requests.values()].filter(
-        (r) => r.status !== 'pending'
-      );
-      fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
-      const tmp = DATA_FILE + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(terminal, null, 2));
-      fs.renameSync(tmp, DATA_FILE);
+      const arr = JSON.parse(raw);
+      console.log('[store] detected legacy JSON-array history — converting to JSONL…');
+      return Array.isArray(arr) ? arr : [];
     } catch (err) {
-      console.error('[store] persist failed:', err.message);
+      console.error('[store] legacy history unreadable:', err.message);
+      return null;
     }
   }
 
-  _persist() {
-    clearTimeout(this._saveTimer);
-    this._saveTimer = setTimeout(() => this._writeNow(), 200);
+  _parseJsonl(raw) {
+    const records = [];
+    const lines = raw.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      try {
+        const r = JSON.parse(line);
+        if (r && r.id) records.push(r);
+      } catch (err) {
+        // A torn final line (crash mid-append) is tolerated and skipped.
+        console.error(`[store] skipping unreadable history line ${i + 1}: ${err.message}`);
+      }
+    }
+    return records;
+  }
+
+  // ---------------------------------------------------------- writing
+
+  /** Compact JSONL text of every terminal record currently in memory. */
+  _jsonlBody() {
+    const terminal = [...this.requests.values()].filter(
+      (r) => r.status !== 'pending'
+    );
+    return terminal.map((r) => JSON.stringify(r)).join('\n') + (terminal.length ? '\n' : '');
+  }
+
+  _writeFileSync(body) {
+    const tmp = DATA_FILE + '.tmp';
+    fs.writeFileSync(tmp, body);
+    fs.renameSync(tmp, DATA_FILE);
+  }
+
+  /** Append one terminal record as a new line (async, ordered). */
+  _enqueueAppend(record) {
+    const line = JSON.stringify(record) + '\n';
+    this._writeQueue = this._writeQueue
+      .then(() => fsp.appendFile(DATA_FILE, line))
+      .catch((err) => console.error('[store] append failed:', err.message));
+  }
+
+  /** Rewrite the whole file from the current terminal records (async, ordered). */
+  _enqueueRewrite() {
+    const body = this._jsonlBody();
+    this._writeQueue = this._writeQueue
+      .then(async () => {
+        const tmp = DATA_FILE + '.tmp';
+        await fsp.writeFile(tmp, body);
+        await fsp.rename(tmp, DATA_FILE);
+      })
+      .catch((err) => console.error('[store] rewrite failed:', err.message));
   }
 
   /**
-   * Write history to disk immediately (debounce bypass). Used by graceful
-   * shutdown so the last finished request is never lost to the 200ms timer.
+   * Resolve once every queued file write has hit disk. Graceful shutdown
+   * awaits this so a request finished right before exit is never lost.
+   * @returns {Promise<void>}
    */
   flush() {
-    clearTimeout(this._saveTimer);
-    this._saveTimer = null;
-    this._writeNow();
+    return this._writeQueue;
   }
+
+  // ------------------------------------------------------------- events
 
   onChange(fn) {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
   }
 
-  _bump(record) {
-    this._persist();
+  _notify(record) {
     for (const fn of this.listeners) fn(record);
   }
+
+  // ------------------------------------------------------------- CRUD
 
   create({ body, stream, api }) {
     const kind = api === 'responses' ? 'responses' : 'chat';
@@ -90,7 +168,10 @@ class Store {
       error: null,
     };
     this.requests.set(id, record);
-    this._bump(record);
+    // A pending request is never persisted — and nothing on disk changed, so
+    // no file write is scheduled (parking a request used to rewrite the whole
+    // history for nothing).
+    this._notify(record);
     return record;
   }
 
@@ -108,7 +189,7 @@ class Store {
     const r = this.requests.get(id);
     if (r && r.status === 'pending' && !r.clientDisconnected) {
       r.clientDisconnected = true;
-      this._bump(r);
+      this._notify(r); // still pending → nothing to persist
     }
   }
 
@@ -119,7 +200,8 @@ class Store {
     r.respondedAt = new Date().toISOString();
     r.error = null;
     r.response = buildResponse(r, { content, tool_calls });
-    this._bump(r);
+    this._enqueueAppend(r);
+    this._notify(r);
     return r;
   }
 
@@ -134,7 +216,8 @@ class Store {
       type: 'server_error',
       code: 'human_rejected',
     };
-    this._bump(r);
+    this._enqueueAppend(r);
+    this._notify(r);
     return r;
   }
 
@@ -149,14 +232,16 @@ class Store {
       type: 'server_error',
       code: 'human_dismissed',
     };
-    this._bump(r);
+    this._enqueueAppend(r);
+    this._notify(r);
     return r;
   }
 
   /**
    * Delete every finished (completed / rejected / dismissed) request. Pending
    * requests are kept — their clients are still connected and waiting. The
-   * persisted history file is rewritten so the wipe survives a restart.
+   * history file is rewritten (empty if nothing finished remains) so the wipe
+   * survives a restart.
    * @returns number of requests removed
    */
   clearHistory() {
@@ -167,7 +252,7 @@ class Store {
         cleared++;
       }
     }
-    if (cleared > 0) this._persist();
+    if (cleared > 0) this._enqueueRewrite();
     return cleared;
   }
 }

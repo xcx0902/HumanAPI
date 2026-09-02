@@ -170,3 +170,8 @@ node examples/responses.js --stream
   client then executes the tool and sends a follow-up request with the tool
   result, which you answer again. The full loop is demonstrated by
   `examples/toolcall.js` (chat) and `examples/responses.js` (Responses).
+- History is stored append-only in `data/requests.json`: one compact JSON
+  record per line. Answering a request appends one line (~O(one request)) —
+  no whole-file rewrite per answer, and writes never block the server. Files
+  written as pretty JSON arrays by older builds are auto-converted on first
+  boot. Use **Clear history** in the UI to wipe the file (rewrites it empty).

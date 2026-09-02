@@ -417,7 +417,7 @@ server.listen(PORT, HOST, () => {
 // ------------------------------------------------------- graceful shutdown
 
 let stopping = false;
-function shutdown(signal) {
+async function shutdown(signal) {
   if (stopping) return;
   stopping = true;
   console.log(`\n[server] ${signal} received — shutting down…`);
@@ -432,9 +432,9 @@ function shutdown(signal) {
     for (const r of parked) store.dismiss(r.id);
   }
 
-  // 2. Persist history now — bypasses the 200ms debounce so the very last
-  //    finished request is never lost to the timer.
-  store.flush();
+  // 2. Wait for every queued file write (writes are async now) to hit disk,
+  //    so the very last finished request is never lost.
+  await store.flush();
 
   // 3. Close the listener, then exit once connections settle.
   server.close(() => {
