@@ -8,14 +8,15 @@
  * still shows history. A `pending` request is never persisted — if the server
  * restarts its client connection is gone anyway.
  *
- * File format (data/requests.json): one compact JSON record per line. A
+ * File format (data/requests.jsonl): one compact JSON record per line. A
  * finished request is APPENDED as a single line, so answering a request costs
  * O(one record) instead of re-serializing the whole history. Writes run on a
  * serialized async queue and never block the event loop; graceful shutdown
  * awaits the queue via flush(). The file is rewritten whole only on Clear.
  *
- * Older builds wrote a pretty-printed JSON array to this file; that format is
- * detected on load and converted to JSONL once.
+ * Older builds used `data/requests.json` (pretty-printed JSON array, later
+ * JSONL). If that file exists and no `.jsonl` file does, it is loaded and
+ * migrated to `data/requests.jsonl` on boot, then the old file is removed.
  */
 
 const fs = require('fs');
@@ -24,7 +25,9 @@ const path = require('path');
 const crypto = require('crypto');
 const { buildResponse } = require('./response');
 
-const DATA_FILE = path.join(__dirname, 'data', 'requests.json');
+const DATA_FILE = path.join(__dirname, 'data', 'requests.jsonl');
+/** Pre-rename location used by older builds; migrated once on boot. */
+const LEGACY_FILE = path.join(__dirname, 'data', 'requests.json');
 
 class Store {
   constructor() {
@@ -40,29 +43,54 @@ class Store {
 
   _load() {
     fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
-    let raw;
-    try {
-      raw = fs.readFileSync(DATA_FILE, 'utf8');
-    } catch {
-      return; // no history yet
-    }
-    if (!raw.trim()) return;
 
+    // 1. Current file (JSONL). A legacy JSON-array body found inside it is
+    //    converted to JSONL in place.
+    const raw = this._readMaybe(DATA_FILE);
+    if (raw !== null) {
+      if (this._absorb(raw)) {
+        console.log('[store] converted legacy JSON-array history to JSONL');
+        this._writeFileSync(this._jsonlBody());
+      }
+      return;
+    }
+
+    // 2. Pre-rename data/requests.json (JSONL or legacy array) — migrate once.
+    const legacyRaw = this._readMaybe(LEGACY_FILE);
+    if (legacyRaw === null) return; // no history yet
+    console.log(`[store] migrating history from ${LEGACY_FILE} → ${DATA_FILE}…`);
+    this._absorb(legacyRaw);
+    try {
+      this._writeFileSync(this._jsonlBody());
+      fs.unlinkSync(LEGACY_FILE);
+      console.log('[store] migration complete');
+    } catch (err) {
+      console.error(`[store] migration failed — keeping ${LEGACY_FILE}:`, err.message);
+    }
+  }
+
+  _readMaybe(file) {
+    try {
+      return fs.readFileSync(file, 'utf8');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Parse `raw` (JSONL, or a legacy pretty-printed JSON array) into the store.
+   * @returns {boolean} true when the text was a legacy array (caller should
+   *   rewrite the file in JSONL form)
+   */
+  _absorb(raw) {
+    if (!raw.trim()) return false;
     const legacy = raw.trimStart().startsWith('[');
     const records = legacy ? this._parseLegacy(raw) : this._parseJsonl(raw);
-    if (records === null) return; // unreadable history already logged
+    if (records === null) return false; // unreadable history already logged
     for (const r of records) {
       if (r && typeof r.id === 'string') this.requests.set(r.id, r);
     }
-    if (legacy) {
-      // One-time migration: rewrite the legacy JSON array as JSONL.
-      try {
-        this._writeFileSync(this._jsonlBody());
-        console.log('[store] converted legacy history to JSONL');
-      } catch (err) {
-        console.error('[store] legacy conversion failed:', err.message);
-      }
-    }
+    return legacy;
   }
 
   _parseLegacy(raw) {

@@ -438,7 +438,7 @@ async function shutdown(signal) {
 
   // 3. Close the listener, then exit once connections settle.
   server.close(() => {
-    console.log('[server] stopped cleanly. history saved to data/requests.json');
+    console.log('[server] stopped cleanly. history saved to data/requests.jsonl');
     process.exit(0);
   });
 

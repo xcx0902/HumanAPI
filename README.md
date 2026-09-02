@@ -95,7 +95,7 @@ node examples/responses.js --stream
 ```
 
 - Requests are **never** forwarded anywhere. They sit in an in-memory queue
-  (history is also persisted to `data/requests.json`, gitignored) until you act.
+  (history is also persisted to `data/requests.jsonl`, gitignored) until you act.
 - The HTTP connection stays open indefinitely — the server disables
   `requestTimeout` so nothing kills a request that's waiting on you.
 - **Streaming** (`stream: true`): the server sends the SSE headers immediately
@@ -132,7 +132,7 @@ node examples/responses.js --stream
 - Switch between **dark and light themes** with the button in the header (your
   choice is remembered in `localStorage`).
 - **Clear history**: the 🗑 button wipes every *finished* request (done /
-  rejected / dismissed) from the UI and from `data/requests.json`. Requests
+  rejected / dismissed) from the UI and from `data/requests.jsonl`. Requests
   still pending are kept — their clients are connected and waiting.
 - Watch the queue drain as the parked clients get their answers.
 
@@ -170,8 +170,10 @@ node examples/responses.js --stream
   client then executes the tool and sends a follow-up request with the tool
   result, which you answer again. The full loop is demonstrated by
   `examples/toolcall.js` (chat) and `examples/responses.js` (Responses).
-- History is stored append-only in `data/requests.json`: one compact JSON
+- History is stored append-only in `data/requests.jsonl`: one compact JSON
   record per line. Answering a request appends one line (~O(one request)) —
   no whole-file rewrite per answer, and writes never block the server. Files
   written as pretty JSON arrays by older builds are auto-converted on first
-  boot. Use **Clear history** in the UI to wipe the file (rewrites it empty).
+  boot. A leftover `data/requests.json` from before the rename is migrated
+  (and removed) automatically on boot. Use **Clear history** in the UI to
+  wipe the file (rewrites it empty).
