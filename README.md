@@ -124,6 +124,11 @@ node examples/responses.js --stream
 - Reply with **content**, **tool calls** (name + JSON arguments, validated),
   or both. `⌘/Ctrl + Enter` sends.
 - Send an **error** or **dismiss** the request.
+- Switch between **dark and light themes** with the button in the header (your
+  choice is remembered in `localStorage`).
+- **Clear history**: the 🗑 button wipes every *finished* request (done /
+  rejected / dismissed) from the UI and from `data/requests.json`. Requests
+  still pending are kept — their clients are connected and waiting.
 - Watch the queue drain as the parked clients get their answers.
 
 ## Endpoints
@@ -138,6 +143,7 @@ node examples/responses.js --stream
 | `POST` | `/api/requests/:id/respond` | answer: `{"content"?, "tool_calls"?: [{name, arguments}]}` |
 | `POST` | `/api/requests/:id/error` | reject: `{"message"?: string}` → HTTP 500 |
 | `POST` | `/api/requests/:id/dismiss` | drop → HTTP 503 |
+| `POST` | `/api/requests/clear` | wipe finished requests → `{"cleared": n, "remaining": n}` |
 | `GET` | `/api/events` | SSE feed of changes (drives the UI) |
 | `GET` | `/` | the web UI |
 

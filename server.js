@@ -13,6 +13,7 @@
  *  - POST /api/requests/:id/respond   admin: human answer {content, tool_calls}.
  *  - POST /api/requests/:id/error     admin: reject the request with an error.
  *  - POST /api/requests/:id/dismiss   admin: drop the request with a 503.
+ *  - POST /api/requests/clear         admin: wipe finished requests (history).
  *  - GET  /*                     static web UI.
  *
  * Zero dependencies: `node server.js` is all you need.
@@ -39,6 +40,9 @@ const MODELS = {
 
 /** id -> { res, stream } for every parked HTTP response */
 const pending = new Map();
+
+/** SSE connections currently watching /api/events (used for broadcasts) */
+const eventClients = new Set();
 
 // ---------------------------------------------------------------- helpers
 
@@ -286,12 +290,28 @@ function handleEvents(req, res) {
     'Access-Control-Allow-Origin': '*',
   });
   sseWrite(res, 'snapshot', store.list());
+  eventClients.add(res);
   const off = store.onChange((record) => sseWrite(res, 'update', record));
   const ping = setInterval(() => res.write(': ping\n\n'), 15000);
   req.on('close', () => {
     clearInterval(ping);
     off();
+    eventClients.delete(res);
   });
+}
+
+/** Wipe the finished-request history and tell every open UI about it. */
+function handleClear(req, res) {
+  const cleared = store.clearHistory();
+  const remaining = store.list();
+  for (const c of eventClients) {
+    try {
+      sseWrite(c, 'cleared', remaining);
+    } catch {
+      /* connection already gone; its close handler removes it */
+    }
+  }
+  sendJson(res, 200, { cleared, remaining: remaining.length });
 }
 
 const MIME = {
@@ -349,6 +369,7 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && p === '/v1/models') return sendJson(res, 200, MODELS);
   if (req.method === 'GET' && p === '/api/events') return handleEvents(req, res);
   if (req.method === 'GET' && p === '/api/requests') return sendJson(res, 200, store.list());
+  if (req.method === 'POST' && p === '/api/requests/clear') return handleClear(req, res);
 
   const admin = p.match(/^\/api\/requests\/([^/]+)\/(respond|error|dismiss)$/);
   if (admin && req.method === 'POST') {

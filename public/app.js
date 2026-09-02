@@ -77,6 +77,10 @@ function connectSSE() {
     else state.requests[i] = rec;
     renderAll();
   });
+  es.addEventListener('cleared', (e) => {
+    state.requests = JSON.parse(e.data); // whatever is left (pending requests)
+    renderAll();
+  });
   es.onerror = () => {
     setConn(false);
     // EventSource auto-reconnects; when it reopens we get a fresh snapshot.
@@ -635,10 +639,95 @@ function wireForm(r) {
   });
 }
 
+// ------------------------------------------------------------- theme
+
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  try {
+    localStorage.setItem('humanapi-theme', t);
+  } catch {
+    /* private mode etc. — theme just won't persist */
+  }
+  renderThemeButton();
+}
+
+function renderThemeButton() {
+  const cur = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+  const next = cur === 'dark' ? 'light' : 'dark';
+  const btn = $('#theme-toggle');
+  if (!btn) return;
+  btn.textContent = next === 'light' ? '☀️' : '🌙';
+  btn.title = `Switch to ${next} theme`;
+  btn.setAttribute('aria-label', btn.title);
+}
+
+// ------------------------------------------------------------- clear history
+
+/** Ask before wiping history; resolves true only when confirmed. */
+function confirmClear(message) {
+  return new Promise((resolve) => {
+    const dlg = $('#clear-confirm');
+    const okBtn = $('#clear-ok');
+    const cancelBtn = $('#clear-cancel');
+    if (!dlg || !okBtn) return resolve(false);
+    $('#clear-confirm-msg').textContent = message;
+
+    let settled = false;
+    const settle = (val) => {
+      if (settled) return;
+      settled = true;
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      dlg.removeEventListener('close', onClose);
+      if (dlg.open) dlg.close();
+      resolve(val);
+    };
+    const onOk = () => settle(true);
+    const onCancel = () => settle(false);
+    const onClose = () => settle(false); // Esc / backdrop dismissal
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    dlg.addEventListener('close', onClose);
+    dlg.showModal();
+  });
+}
+
+function refreshClearButton() {
+  const btn = $('#clear-history');
+  if (!btn) return;
+  const hasFinished = state.requests.some((r) => r.status !== 'pending');
+  btn.disabled = !hasFinished;
+}
+
+async function onClearHistory() {
+  const finished = state.requests.filter((r) => r.status !== 'pending').length;
+  const pend = state.requests.length - finished;
+  if (finished === 0) return;
+  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const msg = pend > 0
+    ? `Delete ${plural(finished, 'finished request')} from history?\n\n` +
+      `${plural(pend, 'pending request')} still waiting for you will be kept.`
+    : `Delete ${plural(finished, 'request')} from history?`;
+  if (!(await confirmClear(msg))) return;
+  try {
+    await api('/api/requests/clear', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    // The SSE 'cleared' event updates the list too; refetch keeps us in sync.
+    state.requests = await api('/api/requests');
+    renderAll();
+  } catch (err) {
+    window.alert(`Clear failed: ${err.message}`);
+  }
+}
+
 // ------------------------------------------------------------- glue
 
 function renderAll() {
   renderList();
+  refreshClearButton();
   renderDetail();
 }
 
@@ -650,6 +739,15 @@ function init() {
     $('#filters').querySelectorAll('.chip').forEach((c) => c.classList.toggle('active', c === btn));
     renderList();
   });
+
+  $('#theme-toggle').addEventListener('click', () => {
+    const cur = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+    setTheme(cur === 'dark' ? 'light' : 'dark');
+  });
+  renderThemeButton();
+
+  $('#clear-history').addEventListener('click', onClearHistory);
+  refreshClearButton();
 
   connectSSE();
   // Immediate paint without waiting for the SSE snapshot.

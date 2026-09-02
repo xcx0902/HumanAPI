@@ -5,6 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Human API — Control Room</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%A7%91%F0%9F%92%BB%3C/text%3E%3C/svg%3E">
+  <script>
+    // Apply the saved theme before first paint so there is no flash.
+    try {
+      var t = localStorage.getItem('humanapi-theme');
+      document.documentElement.dataset.theme = (t === 'light' || t === 'dark') ? t : 'dark';
+    } catch (e) {
+      document.documentElement.dataset.theme = 'dark';
+    }
+  </script>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -15,6 +24,10 @@
       <span id="conn-text">connecting…</span>
       <span class="sep">·</span>
       <span id="queue-count"></span>
+    </div>
+    <div class="header-actions">
+      <button id="clear-history" class="btn btn-ghost btn-sm" title="Delete finished requests from history">🗑 Clear</button>
+      <button id="theme-toggle" class="btn btn-ghost btn-sm icon-btn" title="Switch theme">🌙</button>
     </div>
   </header>
 
@@ -41,5 +54,13 @@
   </main>
 
   <script src="/app.js"></script>
+
+  <dialog id="clear-confirm" class="confirm-dialog">
+    <p id="clear-confirm-msg"></p>
+    <div class="actions">
+      <button id="clear-cancel" class="btn btn-ghost">Cancel</button>
+      <button id="clear-ok" class="btn btn-danger">Clear history</button>
+    </div>
+  </dialog>
 </body>
 </html>

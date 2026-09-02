@@ -140,6 +140,24 @@ class Store {
     this._bump(r);
     return r;
   }
+
+  /**
+   * Delete every finished (completed / rejected / dismissed) request. Pending
+   * requests are kept — their clients are still connected and waiting. The
+   * persisted history file is rewritten so the wipe survives a restart.
+   * @returns number of requests removed
+   */
+  clearHistory() {
+    let cleared = 0;
+    for (const [id, r] of this.requests) {
+      if (r.status !== 'pending') {
+        this.requests.delete(id);
+        cleared++;
+      }
+    }
+    if (cleared > 0) this._persist();
+    return cleared;
+  }
 }
 
 const store = new Store();
