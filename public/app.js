@@ -27,6 +27,11 @@ const STATUS_LABEL = {
   client_gone: 'client gone',
 };
 
+/** Which OpenAI endpoint a record came from (old records are chat). */
+function apiLabelOf(r) {
+  return r.api === 'responses' ? 'responses' : 'chat';
+}
+
 function timeAgo(iso) {
   if (!iso) return '';
   const secs = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
@@ -94,15 +99,91 @@ function filtered() {
   return state.requests.filter((r) => r.status === 'rejected' || r.status === 'dismissed');
 }
 
+// --------------------------------------------------- transcripts (per wire API)
+
+/** Content that may be a string, an array of content parts, or null. */
+function textOfParts(parts) {
+  if (parts == null) return '';
+  if (typeof parts === 'string') return parts;
+  if (!Array.isArray(parts)) return '';
+  return parts
+    .map((p) => (p && typeof p === 'object' ? p.text ?? '' : String(p)))
+    .join('');
+}
+
+function textOf(m) {
+  return textOfParts(m?.content);
+}
+
+/**
+ * The message transcript of a request. Chat requests already carry an array of
+ * `messages`; Responses-API requests carry `instructions` + `input` items,
+ * which are projected onto the same message shape so everything downstream
+ * (folding, previews, tool-call blocks) can stay generic:
+ *   instructions           → system message
+ *   message item           → message with its content text
+ *   function_call item     → assistant message with a tool_calls entry
+ *   function_call_output   → role 'tool' message (the tool's result)
+ */
+function threadOf(r) {
+  const body = r?.body;
+  if (!body) return [];
+  if (r.api !== 'responses') {
+    return Array.isArray(body.messages) ? body.messages : [];
+  }
+
+  const out = [];
+  if (typeof body.instructions === 'string' && body.instructions.trim()) {
+    out.push({ role: 'system', content: body.instructions });
+  }
+  let input = body.input;
+  if (typeof input === 'string') input = [{ type: 'message', role: 'user', content: input }];
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      if (!item || typeof item !== 'object') continue;
+      if (item.type === 'message') {
+        out.push({ role: item.role || 'user', content: textOfParts(item.content) });
+      } else if (item.type === 'function_call') {
+        out.push({
+          role: 'assistant',
+          content: '',
+          tool_calls: [
+            {
+              id: item.call_id || item.id || null,
+              type: 'function',
+              function: {
+                name: item.name || '(function)',
+                arguments:
+                  typeof item.arguments === 'string'
+                    ? item.arguments
+                    : JSON.stringify(item.arguments ?? {}),
+              },
+            },
+          ],
+        });
+      } else if (item.type === 'function_call_output') {
+        out.push({
+          role: 'tool',
+          tool_call_id: item.call_id || '',
+          content:
+            typeof item.output === 'string' ? item.output : JSON.stringify(item.output ?? ''),
+        });
+      }
+    }
+  }
+  return out;
+}
+
 function previewOf(r) {
-  const msgs = r.body?.messages || [];
+  const msgs = threadOf(r);
   const last = msgs[msgs.length - 1];
   if (!last) return '(no messages)';
-  if (typeof last.content === 'string' && last.content.trim()) return last.content;
+  const content = textOf(last).trim();
+  if (content) return content;
   if (last.tool_calls?.length) {
-    return `🔧 ${last.tool_calls.map((t) => t.function?.name).join(', ')}`;
+    const names = last.tool_calls.map((t) => (t.function || t).name).filter(Boolean);
+    return `🔧 ${names.join(', ')}`;
   }
-  if (last.role === 'tool') return `tool result → ${String(last.content).slice(0, 200)}`;
   return `(${last.role} message)`;
 }
 
@@ -111,12 +192,14 @@ function renderList() {
   const items = filtered();
   if (items.length === 0) {
     list.innerHTML = `<div class="empty-list">Nothing here yet. Send a request to
-      <code class="kbd">/v1/chat/completions</code> and it will show up.</div>`;
+      <code class="kbd">/v1/chat/completions</code> or <code class="kbd">/v1/responses</code>
+      and it will show up.</div>`;
     return;
   }
   list.innerHTML = items
     .map((r) => {
       const badges = [`<span class="badge ${r.status}">${STATUS_LABEL[r.status] || r.status}</span>`];
+      badges.push(`<span class="badge kind">${apiLabelOf(r)}</span>`);
       if (r.stream) badges.push('<span class="badge stream">stream</span>');
       if (r.clientDisconnected) badges.push('<span class="badge client_gone">client gone</span>');
       return `<div class="req ${r.id === state.selectedId ? 'selected' : ''}" data-id="${esc(r.id)}">
@@ -158,9 +241,13 @@ const foldOverride = new Map(); // requestId -> Map(msgIdx -> bool: collapsed)
 
 function bodyTextOf(m) {
   const parts = [];
-  if (m.content != null && m.content !== '') parts.push(String(m.content));
+  const content = textOf(m);
+  if (content) parts.push(content);
   for (const tc of m.tool_calls || []) {
-    parts.push(`${tc.function?.name || 'function'} ${tc.function?.arguments || '{}'}`);
+    const fn = tc.function || tc;
+    let args = fn.arguments;
+    if (args && typeof args !== 'string') args = JSON.stringify(args);
+    parts.push(`${fn.name || 'function'} ${args || '{}'}`);
   }
   return parts.join('\n');
 }
@@ -177,7 +264,7 @@ function isFolded(rId, idx, m) {
 
 function toggleFold(rId, idx) {
   const r = state.requests.find((x) => x.id === rId);
-  const m = r?.body?.messages?.[idx];
+  const m = threadOf(r)[idx];
   if (!m) return;
   const per = foldOverride.get(rId) || new Map();
   per.set(idx, !isFolded(rId, idx, m));
@@ -185,7 +272,7 @@ function toggleFold(rId, idx) {
 }
 
 function messageHtml(rId, m, idx) {
-  const content = m.content ?? '';
+  const content = textOf(m);
   const text = bodyTextOf(m);
   const folded = text !== '' && isFolded(rId, idx, m);
   const hasBody = text !== '';
@@ -208,14 +295,15 @@ function messageHtml(rId, m, idx) {
     html += `<div class="msg-body msg-preview">${esc(preview)}</div>`;
     html += `<div class="fold-hint">folded · click header to expand</div>`;
   } else {
-    if (content !== '' && content != null) {
+    if (content !== '') {
       html += `<div class="msg-content">${esc(content)}</div>`;
     }
     if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
       html += `<div class="tool-calls">`;
       for (const tc of m.tool_calls) {
-        const fn = tc.function || {};
+        const fn = tc.function || tc;
         let args = fn.arguments || '{}';
+        if (typeof args !== 'string') args = JSON.stringify(args);
         try { args = JSON.stringify(JSON.parse(args), null, 2); } catch { /* keep raw */ }
         html += `<div class="tool-call">
           <div class="tool-call-head">🔧 ${esc(fn.name || 'function')} <code>${esc(tc.id || '')}</code></div>
@@ -231,7 +319,9 @@ function messageHtml(rId, m, idx) {
 
 function toolNamesOf(r) {
   const tools = r.body?.tools || [];
-  return tools.map((t) => t.function?.name).filter(Boolean);
+  return tools
+    .map((t) => ((t.function || t).name || '').trim())
+    .filter(Boolean);
 }
 
 /**
@@ -292,6 +382,36 @@ function toolsHtmlOf(r) {
   </div>`;
 }
 
+/** Compact, readable shape of what was sent to the client (shown when done). */
+function responseSummaryOf(r) {
+  const resp = r.response || {};
+  if (r.api === 'responses') {
+    const items = Array.isArray(resp.output) ? resp.output : [];
+    const out = {};
+    const content = items
+      .filter((it) => it.type === 'message')
+      .map((it) => textOfParts(it.content))
+      .filter((t) => t.trim())
+      .join('\n');
+    const toolCalls = items
+      .filter((it) => it.type === 'function_call')
+      .map((it) => ({ id: it.id, call_id: it.call_id, name: it.name, arguments: it.arguments }));
+    if (content) out.content = content;
+    if (toolCalls.length) out.tool_calls = toolCalls;
+    out.status = resp.status;
+    if (resp.usage) out.usage = resp.usage;
+    return out;
+  }
+  const msg = resp.choices?.[0]?.message || {};
+  const out = {};
+  if (msg.content != null) out.content = msg.content;
+  if (msg.tool_calls) out.tool_calls = msg.tool_calls;
+  const finishReason = resp.choices?.[0]?.finish_reason;
+  if (finishReason) out.finish_reason = finishReason;
+  if (resp.usage) out.usage = resp.usage;
+  return out;
+}
+
 function renderDetail() {
   const detail = $('#detail');
   const r = state.requests.find((x) => x.id === state.selectedId);
@@ -299,35 +419,28 @@ function renderDetail() {
     detail.innerHTML = `<div class="empty" id="empty-state">
       <div class="empty-icon">🫖</div>
       <p>No request selected.</p>
-      <p class="muted">Requests sent to <code>/v1/chat/completions</code> will
-      appear here, waiting for you. You answer them — the client gets a
-      perfect OpenAI-shaped response.</p>
+      <p class="muted">Requests sent to <code>/v1/chat/completions</code> or
+      <code>/v1/responses</code> will appear here, waiting for you. You answer
+      them — the client gets a perfect OpenAI-shaped response.</p>
     </div>`;
     return;
   }
 
   const badges = [`<span class="badge ${r.status}">${STATUS_LABEL[r.status] || r.status}</span>`];
+  badges.push(`<span class="badge kind">${apiLabelOf(r)}</span>`);
   if (r.stream) badges.push('<span class="badge stream">stream</span>');
   if (r.clientDisconnected) badges.push('<span class="badge client_gone">client gone</span>');
 
-  const thread = (r.body?.messages || []).map((m, i) => messageHtml(r.id, m, i)).join('');
+  const thread = threadOf(r).map((m, i) => messageHtml(r.id, m, i)).join('');
   const toolsHtml = toolsHtmlOf(r);
 
   let bodyHtml;
   if (r.status === 'pending') {
     bodyHtml = respondFormHtml(r);
   } else if (r.status === 'completed') {
-    const resp = r.response || {};
-    const msg = resp.choices?.[0]?.message || {};
-    const out = {
-      content: msg.content ?? null,
-      tool_calls: msg.tool_calls || undefined,
-      finish_reason: resp.choices?.[0]?.finish_reason,
-      usage: resp.usage,
-    };
     bodyHtml = `<div class="finished-box">
       <p class="ok-title">✓ Responded ${fmtTime(r.respondedAt)} — connection closed</p>
-      <pre>${esc(JSON.stringify(out, null, 2))}</pre>
+      <pre>${esc(JSON.stringify(responseSummaryOf(r), null, 2))}</pre>
     </div>`;
   } else {
     bodyHtml = `<div class="finished-box">
@@ -343,6 +456,7 @@ function renderDetail() {
     </div>
     <div class="meta-grid">
       <span>model <b>${esc(r.model)}</b></span>
+      <span>endpoint <b>${apiLabelOf(r)}</b></span>
       <span>received <b>${fmtTime(r.receivedAt)}</b> (${timeAgo(r.receivedAt)})</span>
       <span>transport <b>${r.stream ? 'SSE stream' : 'HTTP JSON'}</b></span>
     </div>

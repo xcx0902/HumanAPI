@@ -61,10 +61,12 @@ class Store {
     for (const fn of this.listeners) fn(record);
   }
 
-  create({ body, stream }) {
-    const id = 'chatcmpl-' + crypto.randomBytes(12).toString('hex');
+  create({ body, stream, api }) {
+    const kind = api === 'responses' ? 'responses' : 'chat';
+    const id = (kind === 'responses' ? 'resp_' : 'chatcmpl-') + crypto.randomBytes(12).toString('hex');
     const record = {
       id,
+      api: kind,
       status: 'pending',
       stream: !!stream,
       model: (body && body.model) || 'human-proxy',

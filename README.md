@@ -2,10 +2,11 @@
 
 An **OpenAI-compatible API endpoint where a human plays the model.**
 
-Every request sent to `POST /v1/chat/completions` is parked ("kept alive") and
-shown in a local web UI. You read the request — messages, tools, everything —
-and type the assistant's answer. The waiting client then receives a perfectly
-shaped OpenAI response, as if a real LLM had replied.
+Every request sent to `POST /v1/chat/completions` (Chat Completions) or
+`POST /v1/responses` (Responses API) is parked ("kept alive") and shown in a
+local web UI. You read the request — messages, tools, everything — and type the
+assistant's answer. The waiting client then receives a perfectly shaped OpenAI
+response, as if a real LLM had replied.
 
 No AI models are involved. No API keys. No security. Just you, a queue, and a
 web page. Zero dependencies: `node server.js` is all it takes.
@@ -21,8 +22,9 @@ node server.js
 ```
 ┌────────────────────────────────────────────────────────
 │ 🧑💻 Human API — OpenAI-compatible endpoint, human answers
-│   OpenAI API:  http://127.0.0.1:8787/v1/chat/completions
-│   Web UI:      http://127.0.0.1:8787/
+│   Chat Completions:  http://127.0.0.1:8787/v1/chat/completions
+│   Responses API:     http://127.0.0.1:8787/v1/responses
+│   Web UI:            http://127.0.0.1:8787/
 └────────────────────────────────────────────────────────
 ```
 
@@ -35,6 +37,13 @@ Then send it something from any OpenAI-compatible client:
 curl -N http://127.0.0.1:8787/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Say hello!"}]}'
+
+# Responses API shape
+curl -N http://127.0.0.1:8787/v1/responses \
+  -H 'content-type: application/json' \
+  -d '{"model":"gpt-4o-mini","instructions":"Be brief.",
+       "input":[{"type":"message","role":"user",
+                 "content":[{"type":"input_text","text":"Say hello!"}]}]}'
 ```
 
 Switch to the browser, click the pending request, type the reply, hit
@@ -44,15 +53,18 @@ Switch to the browser, click the pending request, type the reply, hit
 
 | file | what it shows |
 | --- | --- |
-| `examples/ask.js` | minimal plain-text client (fetch, no SDK) |
-| `examples/stream.js` | `stream: true` client with an SSE parser |
-| `examples/toolcall.js` | tool-calling round trip (declare tools, get tool calls back) |
+| `examples/ask.js` | minimal plain-text chat client (fetch, no SDK) |
+| `examples/stream.js` | chat `stream: true` client with an SSE parser |
+| `examples/toolcall.js` | chat tool-calling round trip (declare tools, get tool calls back) |
+| `examples/responses.js` | Responses API client, non-streaming **and** streaming (`--stream`) |
 
 ```bash
 node examples/ask.js "What color is the sky?"
 node examples/stream.js "Tell me a joke"
 node examples/toolcall.js          # ask; answer in UI with a tool call
 node examples/toolcall.js --with-tool-result   # continue the round trip
+node examples/responses.js         # Responses API (flat tools, input items)
+node examples/responses.js --stream
 ```
 
 ## Configuration
@@ -70,10 +82,11 @@ node examples/toolcall.js --with-tool-result   # continue the round trip
  OpenAI client                  Human API                    You (browser)
  ─────────────                  ─────────                    ─────────────
  POST /v1/chat/completions  ──▶ park request ──▶ SSE/HTTP ──▶ appears in UI
- (connection held open)         "pending"                     read messages
-        ▲                                                      type the answer
+ POST /v1/responses          (connection held open)          read the request
+        ▲                       "pending"                     type the answer
         └─────────── OpenAI-shaped response ◀── respond ◀─────  (or tool calls,
-          (or SSE chunks + [DONE])                               or an error)
+          (chat: JSON or SSE chunks + [DONE];                     or an error)
+           responses: JSON or SSE events)
 ```
 
 - Requests are **never** forwarded anywhere. They sit in an in-memory queue
@@ -82,24 +95,32 @@ node examples/toolcall.js --with-tool-result   # continue the round trip
   `requestTimeout` so nothing kills a request that's waiting on you.
 - **Streaming** (`stream: true`): the server sends the SSE headers immediately
   and holds the stream. When you answer, the whole assistant turn is delivered
-  as a single `chat.completion.chunk` followed by `data: [DONE]`. No fake
-  token-by-token simulation.
+  at once — for chat as a single `chat.completion.chunk` followed by
+  `data: [DONE]`, for the Responses API as a burst of real events
+  (`response.created` → `output_item`/`output_text`/`function_call_arguments`
+  events → `response.completed`). No fake token-by-token simulation.
 - **Tool calls**: you can answer with plain text, one or more tool calls, or
-  both. Tool names are pre-filled from the `tools` the client declared. The
-  response uses the standard `tool_calls` / `finish_reason: "tool_calls"`
-  format, so clients that execute tools work unchanged.
+  both. Tool names are pre-filled from the `tools` the client declared (both
+  the chat `function.function` nesting and the Responses flat shape). Chat
+  responses use `tool_calls` + `finish_reason: "tool_calls"`; Responses
+  responses emit `function_call` output items with a fresh `call_id`, which the
+  client echoes back as `function_call_output` input items.
 - If you'd rather simulate a failure, "Send error" rejects the request with
-  `500 {"error": {...}}` (or an error frame over SSE); "Dismiss" drops it with
-  a `503`. The client sees a real HTTP error either way.
+  `500 {"error": {...}}` (or an `error` frame over SSE); "Dismiss" drops it
+  with a `503`. The client sees a real HTTP error either way.
 
 ## What the human can do in the UI
 
-- See every request live (SSE push), newest first, with filters.
-- Inspect the full message thread: system / user / assistant / tool roles,
-  tool calls and their JSON arguments, declared tools. Long messages (and
-  system prompts in particular) start **folded** — click a message header to
-  expand or fold it, keeping the panel readable. Declared tools appear as
-  name chips; click a name to reveal its description and parameter schema.
+- See every request live (SSE push), newest first, with filters; each entry is
+  tagged `chat` or `responses`.
+- Inspect the full request: the message thread (system / user / assistant /
+  tool roles, tool calls and their JSON arguments) and the declared tools.
+  Responses-API requests show `instructions` as a system message and render
+  `input` items — `function_call` entries appear as assistant tool calls,
+  `function_call_output` entries as tool results. Long messages (and system
+  prompts in particular) start **folded** — click a message header to expand or
+  fold it, keeping the panel readable. Declared tools appear as name chips;
+  click a name to reveal its description and parameter schema.
 - Reply with **content**, **tool calls** (name + JSON arguments, validated),
   or both. `⌘/Ctrl + Enter` sends.
 - Send an **error** or **dismiss** the request.
@@ -109,7 +130,8 @@ node examples/toolcall.js --with-tool-result   # continue the round trip
 
 | method | path | description |
 | --- | --- | --- |
-| `POST` | `/v1/chat/completions` | OpenAI-compatible; parks the request |
+| `POST` | `/v1/chat/completions` | Chat Completions; parks the request |
+| `POST` | `/v1/responses` | Responses API; parks the request |
 | `GET` | `/v1/models` | fake model list (`human-proxy`) |
 | `GET` | `/api/requests` | list all requests (admin) |
 | `GET` | `/api/requests/:id` | one request (admin) |
@@ -122,12 +144,18 @@ node examples/toolcall.js --with-tool-result   # continue the round trip
 ## Notes & limitations
 
 - Any `model` name is accepted and echoed back; nothing is actually called.
-- `n`, `logprobs`, `response_format`, `stop` etc. are ignored — you get one
-  choice with `finish_reason` `stop` or `tool_calls`.
+- Chat requests ignore `n`, `logprobs`, `response_format`, `stop` etc. — you
+  get one choice with `finish_reason` `stop` or `tool_calls`. Responses
+  requests come back as a single `response` with `message` / `function_call`
+  output items; other configuration (`reasoning`, `store`, `text.format`, …)
+  is echoed back rather than honored.
+- The Responses reply is **not stored** (`store: false`) and no assistant
+  message is injected into later requests' `input` — a follow-up request is a
+  fresh parked item whose `input` is whatever the client re-sends.
 - Client-side timeouts: the parked response only returns once you answer, so
   give your client a long/disabled timeout (e.g. the OpenAI SDK's default 10
   minutes might be short if you step away).
 - "Tool calls" here means the assistant *emits* tool calls to the client; the
   client then executes the tool and sends a follow-up request with the tool
   result, which you answer again. The full loop is demonstrated by
-  `examples/toolcall.js`.
+  `examples/toolcall.js` (chat) and `examples/responses.js` (Responses).

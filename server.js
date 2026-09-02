@@ -4,8 +4,9 @@
 /**
  * Human API — an OpenAI-compatible endpoint where a human plays the model.
  *
- *  - POST /v1/chat/completions  OpenAI-compatible (messages, tools, stream).
- *      The request is parked ("kept alive") until a human answers it in the UI.
+ *  - POST /v1/chat/completions  OpenAI Chat Completions (messages, tools, stream).
+ *  - POST /v1/responses         OpenAI Responses API (input, tools, stream).
+ *      Requests are parked ("kept alive") until a human answers them in the UI.
  *  - GET  /v1/models             fake model list so OpenAI clients are happy.
  *  - GET  /api/requests          admin: list all requests.
  *  - GET  /api/events            admin: SSE feed of live changes (drives the UI).
@@ -23,7 +24,7 @@ const path = require('path');
 const { URL } = require('url');
 
 const store = require('./store');
-const { buildStreamChunks } = require('./response');
+const { buildStreamChunks, buildResponsesStreamEvents } = require('./response');
 
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = parseInt(process.env.PORT || '8787', 10);
@@ -83,11 +84,18 @@ function deliver(record) {
   const { res, stream } = parked;
   if (res.destroyed || res.writableEnded) return;
 
+  const isResponses = record.api === 'responses';
+
   if (record.status === 'rejected' || record.status === 'dismissed') {
     const status = record.status === 'rejected' ? 500 : 503;
     const payload = { error: record.error };
     if (stream) {
-      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      if (isResponses) {
+        // Responses API reports failures as an `error` SSE event.
+        sseWrite(res, 'error', { type: 'error', error: record.error });
+      } else {
+        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      }
       res.end();
     } else {
       sendJson(res, status, payload);
@@ -96,10 +104,16 @@ function deliver(record) {
   }
 
   if (stream) {
-    for (const chunk of buildStreamChunks(record, record.response)) {
-      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    if (isResponses) {
+      for (const ev of buildResponsesStreamEvents(record, record.response)) {
+        sseWrite(res, ev.event, ev.data);
+      }
+    } else {
+      for (const chunk of buildStreamChunks(record, record.response)) {
+        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      }
+      res.write('data: [DONE]\n\n');
     }
-    res.write('data: [DONE]\n\n');
     res.end();
     return;
   }
@@ -114,7 +128,7 @@ store.onChange((record) => {
 
 // ---------------------------------------------------------------- routes
 
-async function handleChatCompletions(req, res) {
+async function handleIncoming(req, res, api) {
   const raw = await readBody(req);
   let body;
   try {
@@ -134,19 +148,35 @@ async function handleChatCompletions(req, res) {
       error: { message: 'Request body must be a JSON object', type: 'invalid_request_error' },
     });
   }
-  if (!Array.isArray(body.messages)) {
-    return sendJson(res, 400, {
-      error: {
-        message: '"messages" must be an array',
-        type: 'invalid_request_error',
-        param: 'messages',
-        code: null,
-      },
-    });
+
+  if (api === 'chat') {
+    if (!Array.isArray(body.messages)) {
+      return sendJson(res, 400, {
+        error: {
+          message: '"messages" must be an array',
+          type: 'invalid_request_error',
+          param: 'messages',
+          code: null,
+        },
+      });
+    }
+  } else {
+    // Responses API: input is an array of items, or a plain text string.
+    const input = body.input;
+    if (input != null && typeof input !== 'string' && !Array.isArray(input)) {
+      return sendJson(res, 400, {
+        error: {
+          message: '"input" must be a string or an array of items',
+          type: 'invalid_request_error',
+          param: 'input',
+          code: null,
+        },
+      });
+    }
   }
 
   const stream = body.stream === true;
-  const record = store.create({ body, stream });
+  const record = store.create({ body, stream, api });
 
   if (stream) {
     // Send headers immediately so the client sees a live 200 response.
@@ -311,7 +341,10 @@ async function handleRequest(req, res) {
   const p = url.pathname;
 
   if (req.method === 'POST' && p === '/v1/chat/completions') {
-    return handleChatCompletions(req, res);
+    return handleIncoming(req, res, 'chat');
+  }
+  if (req.method === 'POST' && p === '/v1/responses') {
+    return handleIncoming(req, res, 'responses');
   }
   if (req.method === 'GET' && p === '/v1/models') return sendJson(res, 200, MODELS);
   if (req.method === 'GET' && p === '/api/events') return handleEvents(req, res);
@@ -354,7 +387,8 @@ server.keepAliveTimeout = 5000;
 server.listen(PORT, HOST, () => {
   console.log('┌────────────────────────────────────────────────────────');
   console.log('│ 🧑‍💻 Human API — OpenAI-compatible endpoint, human answers');
-  console.log(`│   OpenAI API:  http://${HOST}:${PORT}/v1/chat/completions`);
-  console.log(`│   Web UI:      http://${HOST}:${PORT}/`);
+  console.log(`│   Chat Completions:  http://${HOST}:${PORT}/v1/chat/completions`);
+  console.log(`│   Responses API:     http://${HOST}:${PORT}/v1/responses`);
+  console.log(`│   Web UI:            http://${HOST}:${PORT}/`);
   console.log('└────────────────────────────────────────────────────────');
 });

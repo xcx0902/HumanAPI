@@ -150,6 +150,7 @@ aside {
 .badge.rejected, .badge.dismissed { color: #ff9a9a; border-color: #6b2b2b; background: #2a1414; }
 .badge.client_gone { color: #aab3c5; border-color: #3a4150; background: #1c1f27; }
 .badge.stream { color: #9db8ff; border-color: #2c3f6b; background: #131c2e; }
+.badge.kind { color: #8ec9c5; border-color: #23534f; background: #10201f; font-size: 9.5px; }
 
 .req-preview {
   font-size: 13px;
